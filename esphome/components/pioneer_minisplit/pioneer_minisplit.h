@@ -227,6 +227,7 @@ class PioneerMinisplit : public climate::Climate, public Component, public uart:
   bool pending_health_ = false;
   bool pending_mute_ = false;
   bool pending_8c_heater_ = false;
+  bool pending_half_degree_ = false;
   uint8_t pending_sleep_ = 0;
   
   // Track if we've synced state from HVAC at least once

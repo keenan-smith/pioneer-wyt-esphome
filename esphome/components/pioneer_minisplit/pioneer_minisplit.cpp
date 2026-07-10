@@ -191,6 +191,11 @@ void PioneerMinisplit::send_command_() {
     packet[11] = 0x08;
   }
   
+  // Byte 14: half-degree flag (bit 5 = 0x20)
+  if (this->pending_half_degree_) {
+    packet[14] |= 0x20;
+  }
+  
   // Byte 19: sleep mode
   packet[19] = this->pending_sleep_;
   
@@ -209,8 +214,10 @@ void PioneerMinisplit::send_command_() {
   if (this->packets_tx_sensor_) this->packets_tx_sensor_->publish_state(this->tx_count_);
   if (this->last_tx_sensor_) this->last_tx_sensor_->publish_state(this->hex_string_(packet, sizeof(packet)));
   
-  ESP_LOGI(TAG, "TX CMD: pwr=%d mode=0x%02X temp=%d fan=0x%02X",
-           this->pending_power_, this->pending_mode_, this->pending_temp_, this->pending_fan_);
+  ESP_LOGI(TAG, "TX CMD: pwr=%d mode=0x%02X temp=%.1f fan=0x%02X",
+           this->pending_power_, this->pending_mode_, 
+           this->pending_temp_ + (this->pending_half_degree_ ? 0.5f : 0.0f), 
+           this->pending_fan_);
 }
 
 void PioneerMinisplit::process_packet_(uint8_t *buf, size_t len) {
@@ -239,6 +246,7 @@ void PioneerMinisplit::decode_rx_packet_(uint8_t *buf, size_t len) {
   uint8_t byte10 = buf[10];
   uint8_t byte11 = len > 11 ? buf[11] : 0;
   uint8_t byte12 = len > 12 ? buf[12] : 0;
+  uint8_t byte14 = len > 14 ? buf[14] : 0;
   uint8_t byte18 = len > 18 ? buf[18] : 0;
   uint8_t byte19 = len > 19 ? buf[19] : 0;
   uint8_t byte30 = len > 30 ? buf[30] : 0;
@@ -259,6 +267,7 @@ void PioneerMinisplit::decode_rx_packet_(uint8_t *buf, size_t len) {
   
   uint8_t fan = (fan_temp >> 4) & 0x0F;
   uint8_t set_temp = (fan_temp & 0x0F) + 16;
+  bool half_degree = (byte14 & 0x20) != 0;
   
   bool timer_active = (byte9 & 0x40) != 0;
   bool health = (byte9 & 0x04) != 0;
@@ -285,11 +294,11 @@ void PioneerMinisplit::decode_rx_packet_(uint8_t *buf, size_t len) {
     }
   }
   
-  ESP_LOGD(TAG, "RX: %s %s %dC %.1fC fan=%X",
-           power ? "ON" : "OFF", this->mode_str_(mode), set_temp, current_temp, fan);
+  ESP_LOGD(TAG, "RX: %s %s %.1fC %.1fC fan=%X",
+           power ? "ON" : "OFF", this->mode_str_(mode), set_temp + (half_degree ? 0.5f : 0.0f), current_temp, fan);
   
   // Update sensors (publish Celsius - HA will convert to user's preferred unit)
-  if (this->set_temp_sensor_) this->set_temp_sensor_->publish_state((float)set_temp);
+  if (this->set_temp_sensor_) this->set_temp_sensor_->publish_state(set_temp + (half_degree ? 0.5f : 0.0f));
   if (current_temp > 0) {
     if (this->current_temp_sensor_) this->current_temp_sensor_->publish_state(current_temp);
   }
@@ -501,7 +510,7 @@ void PioneerMinisplit::decode_rx_packet_(uint8_t *buf, size_t len) {
   else if (swing_h_active) this->swing_mode = climate::CLIMATE_SWING_HORIZONTAL;
   else this->swing_mode = climate::CLIMATE_SWING_OFF;
   
-  this->target_temperature = set_temp;
+  this->target_temperature = set_temp + (half_degree ? 0.5f : 0.0f);
   this->current_temperature = current_temp;
   this->publish_state();
   
@@ -515,6 +524,7 @@ void PioneerMinisplit::decode_rx_packet_(uint8_t *buf, size_t len) {
     this->pending_health_ = health;
     this->pending_mute_ = mute_flag;
     this->pending_8c_heater_ = heater_8c;
+    this->pending_half_degree_ = half_degree;
     this->pending_swing_v_active_ = swing_v_active;
     
     // Sync mode and fan from RX (convert RX mode to TX mode format)
@@ -661,6 +671,8 @@ void PioneerMinisplit::control(const climate::ClimateCall &call) {
     if (temp < 16) temp = 16;
     if (temp > 31) temp = 31;
     this->pending_temp_ = (uint8_t)temp;
+    // Half-degree: if fractional part >= 0.5, set the half_degree flag
+    this->pending_half_degree_ = ((temp - this->pending_temp_) >= 0.5f);
     this->command_pending_ = true;
   }
   
@@ -740,7 +752,7 @@ void PioneerMinisplit::control(const climate::ClimateCall &call) {
       }
     }
     
-    this->target_temperature = this->pending_temp_;
+    this->target_temperature = this->pending_temp_ + (this->pending_half_degree_ ? 0.5f : 0.0f);
     
     if (this->pending_turbo_) {
       this->set_custom_fan_mode_("Strong");
@@ -783,7 +795,8 @@ climate::ClimateTraits PioneerMinisplit::traits() {
   traits.add_feature_flags(climate::CLIMATE_SUPPORTS_ACTION | climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE);
   traits.set_visual_min_temperature(16);
   traits.set_visual_max_temperature(31);
-  traits.set_visual_temperature_step(1);
+  traits.set_visual_temperature_step(0.5f);
+  traits.set_visual_target_temperature_step(0.5f);
   
   traits.set_supported_modes({
     climate::CLIMATE_MODE_OFF,
